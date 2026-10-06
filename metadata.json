@@ -1,0 +1,8 @@
+{
+  "name": "CapCut Pro Studio - Video & Thumbnail Suite",
+  "description": "Professional responsive video editor, multi-clip video merger, social media thumbnail designer, and image editor powered by Python, TypeScript, and React with full format export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
