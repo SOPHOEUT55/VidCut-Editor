@@ -15,7 +15,7 @@ import {
 import { MediaItem, TextStylePreset, TransitionType } from '../../types/editor';
 
 interface MediaDrawerProps {
-  onAddVideoClip: (media: MediaItem) => void;
+  onAddVideoClip: (media: MediaItem, startTime?: number) => void;
   onAddTextClip: (preset: TextStylePreset) => void;
   onAddAudioClip: (media: MediaItem) => void;
   onAddSticker: (symbol: string) => void;
@@ -266,14 +266,20 @@ export const MediaDrawer: React.FC<MediaDrawerProps> = ({
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold text-slate-300">Ready Sample Videos</span>
-                <span className="text-[11px] text-slate-500">Click + to add</span>
+                <span className="text-[11px] text-slate-500">Drag to place · + to append</span>
               </div>
               <div className="space-y-2">
                 {sampleVideos.map((video) => (
                   <div
                     key={video.id}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData('application/x-vidcut-media', JSON.stringify(video));
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
                     className="group flex items-center gap-2.5 p-2 bg-[#141b27] hover:bg-[#1a2333] border border-slate-800 rounded-lg transition-colors cursor-pointer"
                     onClick={() => onAddVideoClip(video)}
+                    title="Drag onto the timeline to choose a position, or click to append"
                   >
                     <div className="w-16 h-10 bg-slate-900 rounded overflow-hidden relative shrink-0">
                       {video.thumbnail ? (
@@ -301,6 +307,10 @@ export const MediaDrawer: React.FC<MediaDrawerProps> = ({
                     <button
                       className="p-1.5 rounded-md bg-cyan-500/20 text-cyan-400 group-hover:bg-cyan-500 group-hover:text-black transition-colors"
                       title="Add to timeline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onAddVideoClip(video);
+                      }}
                     >
                       <Plus className="w-3.5 h-3.5" />
                     </button>

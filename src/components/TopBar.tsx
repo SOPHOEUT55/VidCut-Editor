@@ -9,6 +9,7 @@ import {
   MonitorPlay,
   Layers,
   Cpu,
+  Crown,
 } from 'lucide-react';
 import { EditorMode, AspectRatioType } from '../types/editor';
 
@@ -21,6 +22,8 @@ interface TopBarProps {
   onOpenCppModal?: () => void;
   onResetProject: () => void;
   hasItems: boolean;
+  isExpert: boolean;
+  onOpenAccount: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -32,6 +35,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenCppModal,
   onResetProject,
   hasItems,
+  isExpert,
+  onOpenAccount,
 }) => {
   return (
     <header className="h-14 bg-[#0d121c] border-b border-slate-800/80 px-4 flex items-center justify-between select-none z-30 shrink-0">
@@ -45,7 +50,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             <Film className="w-4 h-4 text-slate-950 font-bold" />
           </div>
           <span className="font-extrabold text-white tracking-normal font-sans">
-            CapCut <span className="text-cyan-400 font-semibold text-sm">Studio</span>
+            VidCut <span className="text-cyan-400 font-semibold text-sm">Studio</span>
           </span>
         </a>
       </div>
@@ -103,6 +108,19 @@ export const TopBar: React.FC<TopBarProps> = ({
 
       {/* Zone 3: Primary actions & canvas aspect ratio selector */}
       <div className="flex items-center gap-2.5">
+        <button
+          onClick={onOpenAccount}
+          title={isExpert ? 'Manage your Expert subscription' : 'Sign in or upgrade to Expert'}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap ${
+            isExpert
+              ? 'text-amber-200 bg-amber-950/30 border-amber-500/30 hover:bg-amber-900/50'
+              : 'text-slate-300 bg-[#151b26] border-slate-800 hover:bg-slate-800 hover:text-white'
+          }`}
+        >
+          <Crown className="w-3.5 h-3.5" />
+          <span>{isExpert ? 'Expert' : 'Account'}</span>
+        </button>
+
         {currentMode === 'video-editor' && (
           <div className="flex items-center gap-1.5 bg-[#151b26] px-2 py-1 rounded-lg border border-slate-800 text-xs">
             <MonitorPlay className="w-3.5 h-3.5 text-slate-400" />
@@ -123,11 +141,11 @@ export const TopBar: React.FC<TopBarProps> = ({
         {onOpenCppModal && (
           <button
             onClick={onOpenCppModal}
-            title="Inspect C++ Native Turbo Core & Benchmark"
+            title="Inspect Turbo Engine & Benchmark"
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-cyan-300 bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/30 transition-colors whitespace-nowrap cursor-pointer"
           >
             <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-mono text-[11px]">C++ Turbo</span>
+            <span className="font-mono text-[11px]">Turbo Engine</span>
           </button>
         )}
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Layers,
   Plus,
@@ -13,9 +13,17 @@ import {
   CheckCircle,
   AlertCircle,
   Loader2,
+  Upload,
+  LockKeyhole,
 } from 'lucide-react';
-import { MediaItem, TransitionType } from '../../types/editor';
+import { TransitionType } from '../../types/editor';
 import { exportViaPythonEngine, triggerDownload } from '../../utils/mediaExporter';
+
+interface VideoMergerStudioProps {
+  accessToken?: string;
+  isExpert: boolean;
+  onUpgrade: () => void;
+}
 
 interface MergerClipItem {
   id: string;
@@ -29,7 +37,12 @@ interface MergerClipItem {
   transitionAfter: TransitionType;
 }
 
-export const VideoMergerStudio: React.FC = () => {
+export const VideoMergerStudio: React.FC<VideoMergerStudioProps> = ({
+  accessToken,
+  isExpert,
+  onUpgrade,
+}) => {
+  const [isUploading, setIsUploading] = useState(false);
   const [clips, setClips] = useState<MergerClipItem[]>([
     {
       id: 'm1',
@@ -62,6 +75,13 @@ export const VideoMergerStudio: React.FC = () => {
   const [mergedVideoUrl, setMergedVideoUrl] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isExpert && resolution === '1920x1080') {
+      setResolution('1280x720');
+    }
+  }, [isExpert, resolution]);
 
   // Add preset sample clip
   const handleAddSampleClip = (name: string, url: string, thumb: string, duration: number) => {
@@ -76,6 +96,96 @@ export const VideoMergerStudio: React.FC = () => {
       transitionAfter: 'none',
     };
     setClips((prev) => [...prev, newItem]);
+  };
+
+  const handleUploadVideos = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+
+    setIsUploading(true);
+    setErrorMessage(null);
+    setStatusMessage('');
+    const uploadedClips: MergerClipItem[] = [];
+    const failedFiles: string[] = [];
+
+    for (const file of files) {
+      if (!file.type.startsWith('video/')) {
+        failedFiles.push(`${file.name}: not a video file`);
+        continue;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('/api/upload', { method: 'POST', body: formData });
+        if (!response.ok) {
+          throw new Error(`Upload failed (${response.status})`);
+        }
+
+        const result: unknown = await response.json();
+        if (
+          typeof result !== 'object' ||
+          result === null ||
+          !('file' in result) ||
+          typeof result.file !== 'object' ||
+          result.file === null
+        ) {
+          throw new Error('Upload response did not include video details');
+        }
+
+        const uploadedFile = result.file;
+        if (
+          !('id' in uploadedFile) ||
+          typeof uploadedFile.id !== 'string' ||
+          !('name' in uploadedFile) ||
+          typeof uploadedFile.name !== 'string' ||
+          !('url' in uploadedFile) ||
+          typeof uploadedFile.url !== 'string'
+        ) {
+          throw new Error('Upload response contained invalid video details');
+        }
+
+        const duration =
+          'duration' in uploadedFile &&
+          typeof uploadedFile.duration === 'number' &&
+          Number.isFinite(uploadedFile.duration) &&
+          uploadedFile.duration > 0
+            ? uploadedFile.duration
+            : 5;
+        const path =
+          'path' in uploadedFile && typeof uploadedFile.path === 'string'
+            ? uploadedFile.path
+            : undefined;
+
+        uploadedClips.push({
+          id: `merge-${uploadedFile.id}`,
+          name: uploadedFile.name,
+          url: uploadedFile.url,
+          path,
+          duration,
+          startTrim: 0,
+          endTrim: duration,
+          transitionAfter: 'none',
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown upload error';
+        failedFiles.push(`${file.name}: ${message}`);
+      }
+    }
+
+    if (uploadedClips.length > 0) {
+      setClips((prev) => [...prev, ...uploadedClips]);
+      setMergedVideoUrl(null);
+      setStatusMessage(
+        `${uploadedClips.length} video${uploadedClips.length === 1 ? '' : 's'} added to the merge sequence.`
+      );
+    }
+    if (failedFiles.length > 0) {
+      setErrorMessage(`Could not add ${failedFiles.length} file${failedFiles.length === 1 ? '' : 's'}: ${failedFiles.join('; ')}`);
+    }
+
+    setIsUploading(false);
+    event.target.value = '';
   };
 
   // Reordering clips
@@ -122,6 +232,7 @@ export const VideoMergerStudio: React.FC = () => {
         fps,
         audioPath: includeMusic ? bgAudio : undefined,
         audioVolume: 0.8,
+        accessToken,
       };
 
       const result = await exportViaPythonEngine(payloadClips, options);
@@ -205,6 +316,27 @@ export const VideoMergerStudio: React.FC = () => {
 
               {/* Quick Add Samples */}
               <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/*"
+                  multiple
+                  onChange={handleUploadVideos}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading || isMerging}
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 rounded text-cyan-300 disabled:opacity-50"
+                  title="Upload multiple videos to add to the merge sequence"
+                >
+                  {isUploading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5" />
+                  )}
+                  {isUploading ? 'Uploading...' : 'Add Videos'}
+                </button>
                 <span className="text-[11px] text-slate-500">Add Sample:</span>
                 <button
                   onClick={() =>
@@ -430,10 +562,18 @@ export const VideoMergerStudio: React.FC = () => {
                   className="w-full bg-[#182030] border border-slate-700 rounded-lg p-2 text-xs text-slate-200 outline-none"
                 >
                   <option value="1280x720">720p HD (1280x720) - 16:9</option>
-                  <option value="1920x1080">1080p Full HD (1920x1080) - 16:9</option>
+                  <option value="1920x1080" disabled={!isExpert}>1080p Full HD (Expert)</option>
                   <option value="720x1280">Vertical Reel / TikTok (720x1280) - 9:16</option>
                 </select>
               </div>
+              {!isExpert && (
+                <button
+                  onClick={onUpgrade}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-700/50 bg-amber-950/20 py-2 text-[11px] font-medium text-amber-200 hover:bg-amber-950/40"
+                >
+                  <LockKeyhole className="h-3 w-3" /> Upgrade to Expert for Full HD · $4.99/month
+                </button>
+              )}
 
               <div>
                 <span className="text-[11px] text-slate-400 block mb-1">Frame Rate (FPS)</span>

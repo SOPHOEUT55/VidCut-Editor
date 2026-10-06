@@ -89,7 +89,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
   });
 
   // Adding video clip to timeline
-  const handleAddVideoClip = (media: MediaItem) => {
+  const handleAddVideoClip = (media: MediaItem, startTime?: number) => {
     const nextStart = videoClips.length > 0 ? videoClips[videoClips.length - 1].startTime + videoClips[videoClips.length - 1].duration : 0;
     const clipDur = media.duration || 5;
 
@@ -99,7 +99,7 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
       name: media.name,
       url: media.url,
       path: media.path,
-      startTime: nextStart,
+      startTime: startTime ?? nextStart,
       inPoint: 0,
       outPoint: clipDur,
       duration: clipDur,
@@ -122,6 +122,21 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
     setVideoClips((prev) => [...prev, newClip]);
     setSelectedClipId(newClip.id);
     setSelectedClipType('video');
+  };
+
+  const handleMoveClipPosition = (id: string, startTime: number) => {
+    setVideoClips((prev) =>
+      prev.map((clip) => (clip.id === id ? { ...clip, startTime } : clip))
+    );
+    setTextClips((prev) =>
+      prev.map((clip) => (clip.id === id ? { ...clip, startTime } : clip))
+    );
+    setOverlayClips((prev) =>
+      prev.map((clip) => (clip.id === id ? { ...clip, startTime } : clip))
+    );
+    setAudioClips((prev) =>
+      prev.map((clip) => (clip.id === id ? { ...clip, startTime } : clip))
+    );
   };
 
   // Adding text clip
@@ -396,7 +411,8 @@ export const VideoEditor: React.FC<VideoEditorProps> = ({
         onDeleteClip={handleDeleteClip}
         onDuplicateClip={handleDuplicateClip}
         onUpdateClipDuration={() => {}}
-        onMoveClipPosition={() => {}}
+        onMoveClipPosition={handleMoveClipPosition}
+        onDropVideoClip={handleAddVideoClip}
         onCppAutoSplit={handleCppAutoSplit}
       />
     </div>

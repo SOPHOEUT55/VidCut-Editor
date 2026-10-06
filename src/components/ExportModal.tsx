@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Download,
@@ -9,6 +9,7 @@ import {
   AlertCircle,
   Loader2,
   Sparkles,
+  LockKeyhole,
 } from 'lucide-react';
 import { VideoClip, TextClip, OverlayClip, AudioClip, ExportSettings, AspectRatioType } from '../types/editor';
 import { renderTimelineInBrowser, exportViaPythonEngine, triggerDownload } from '../utils/mediaExporter';
@@ -22,6 +23,9 @@ interface ExportModalProps {
   overlayClips: OverlayClip[];
   audioClips: AudioClip[];
   totalDuration: number;
+  accessToken?: string;
+  isExpert: boolean;
+  onUpgrade: () => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -33,10 +37,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   overlayClips,
   audioClips,
   totalDuration,
+  accessToken,
+  isExpert,
+  onUpgrade,
 }) => {
   const [settings, setSettings] = useState<ExportSettings>({
     format: 'mp4',
-    resolution: '1080p',
+    resolution: '720p',
     fps: 30,
     engine: 'python_ffmpeg',
     quality: 'high',
@@ -48,9 +55,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!isExpert && settings.resolution !== '720p') {
+      setSettings((current) => ({ ...current, resolution: '720p' }));
+    }
+  }, [isExpert, settings.resolution]);
+
   if (!isOpen) return null;
 
   const handleStartExport = async () => {
+    if (settings.resolution !== '720p' && settings.engine === 'browser_canvas') {
+      setErrorMessage('Full HD exports must use the authenticated server rendering engine.');
+      return;
+    }
     setIsExporting(true);
     setProgress(0);
     setErrorMessage(null);
@@ -74,6 +91,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           format: settings.format,
           resolution: settings.resolution === '4k' ? '3840x2160' : settings.resolution === '1080p' ? '1920x1080' : '1280x720',
           fps: settings.fps,
+          accessToken,
         };
 
         const result = await exportViaPythonEngine(payloadClips, options);
@@ -168,20 +186,47 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <div>
               <span className="text-slate-400 font-medium block mb-1.5">Resolution</span>
               <div className="grid grid-cols-2 gap-1.5">
-                {(['720p', '1080p', '4k'] as const).map((res) => (
+                {(['720p', '1080p', '4k'] as const).map((res) => {
+                  const requiresExpert = res !== '720p' && !isExpert;
+                  return (
                   <button
                     key={res}
-                    onClick={() => setSettings({ ...settings, resolution: res })}
+                    onClick={() => {
+                      if (requiresExpert) {
+                        onUpgrade();
+                        return;
+                      }
+                      setSettings({
+                        ...settings,
+                        resolution: res,
+                        engine: res === '720p' ? settings.engine : 'python_ffmpeg',
+                      });
+                    }}
+                    aria-label={requiresExpert ? `${res.toUpperCase()} requires Expert subscription` : res.toUpperCase()}
                     className={`py-2 rounded-lg border text-center font-mono ${
                       settings.resolution === res
                         ? 'bg-cyan-500 text-slate-950 font-bold border-cyan-400'
-                        : 'bg-[#151c2a] border-slate-700 text-slate-200'
+                        : requiresExpert
+                          ? 'bg-[#151c2a] border-amber-700/60 text-amber-200 hover:border-amber-500'
+                          : 'bg-[#151c2a] border-slate-700 text-slate-200'
                     }`}
                   >
-                    {res.toUpperCase()}
+                    <span className="inline-flex items-center justify-center gap-1">
+                      {res.toUpperCase()}
+                      {requiresExpert && <LockKeyhole className="h-3 w-3" />}
+                    </span>
                   </button>
-                ))}
+                  );
+                })}
               </div>
+              {!isExpert && (
+                <button
+                  onClick={onUpgrade}
+                  className="mt-2 text-[10px] font-medium text-amber-300 hover:text-amber-200"
+                >
+                  Upgrade to Expert for Full HD export · $4.99/month
+                </button>
+              )}
             </div>
 
             <div>
@@ -218,18 +263,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               >
                 <Cpu className={`w-4 h-4 mt-0.5 ${settings.engine === 'python_ffmpeg' ? 'text-cyan-400' : 'text-slate-500'}`} />
                 <div>
-                  <span className="font-semibold text-xs block text-slate-200">Python + C++ Native Turbo Engine</span>
-                  <span className="text-[10px] text-slate-400 block mt-0.5">High-speed C++17 SIMD pixel grading, film grain synthesis, and FFmpeg multi-codec encoding.</span>
+                  <span className="font-semibold text-xs block text-slate-200">Fast Export</span>
                 </div>
               </button>
 
               <button
                 onClick={() => setSettings({ ...settings, engine: 'browser_canvas' })}
+                disabled={settings.resolution !== '720p'}
                 className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition-all ${
                   settings.engine === 'browser_canvas'
                     ? 'bg-cyan-950/40 border-cyan-400 text-white'
                     : 'bg-[#151c2a] border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
+                } disabled:cursor-not-allowed disabled:opacity-40`}
               >
                 <Sparkles className={`w-4 h-4 mt-0.5 ${settings.engine === 'browser_canvas' ? 'text-cyan-400' : 'text-slate-500'}`} />
                 <div>
@@ -238,6 +283,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </div>
               </button>
             </div>
+            {settings.resolution !== '720p' && (
+              <p className="mt-2 text-[10px] text-amber-200">
+                Full HD and higher exports use server rendering to verify your Expert subscription.
+              </p>
+            )}
           </div>
 
           {/* Progress / Status feedback */}

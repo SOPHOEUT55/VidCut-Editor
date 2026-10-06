@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import type { Session, User } from '@supabase/supabase-js';
 import { TopBar } from './components/TopBar';
 import { VideoEditor } from './components/video-editor/VideoEditor';
 import { VideoMergerStudio } from './components/video-merger/VideoMergerStudio';
@@ -11,6 +12,8 @@ import { ThumbnailDesigner } from './components/thumbnail-designer/ThumbnailDesi
 import { ImageEditorStudio } from './components/image-editor/ImageEditorStudio';
 import { ExportModal } from './components/ExportModal';
 import { CppEngineModal } from './components/CppEngineModal';
+import { AccountModal } from './components/AccountModal';
+import { supabase } from './utils/supabase';
 import {
   EditorMode,
   AspectRatioType,
@@ -20,12 +23,127 @@ import {
   AudioClip,
 } from './types/editor';
 
+interface SubscriptionState {
+  status: string;
+  currentPeriodEnd: string | null;
+  isExpert: boolean;
+}
+
 export default function App() {
   const [currentMode, setCurrentMode] = useState<EditorMode>('video-editor');
   const [aspectRatio, setAspectRatio] = useState<AspectRatioType>('16:9');
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
   const [isCppModalOpen, setIsCppModalOpen] = useState<boolean>(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState<boolean>(false);
   const [capturedThumbnailFrame, setCapturedThumbnailFrame] = useState<string | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [subscription, setSubscription] = useState<SubscriptionState | null>(null);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
+  const [billingNotice, setBillingNotice] = useState<string | null>(null);
+  const isExpert = subscription?.isExpert === true;
+
+  useEffect(() => {
+    if (!supabase) return;
+    let isMounted = true;
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (error) {
+        console.error('Could not restore Supabase session:', error);
+        return;
+      }
+      if (isMounted) {
+        setSession(data.session);
+        setUser(data.session?.user ?? null);
+      }
+    });
+
+    const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setUser(nextSession?.user ?? null);
+      if (!nextSession) setSubscription(null);
+    });
+    return () => {
+      isMounted = false;
+      authSubscription.unsubscribe();
+    };
+  }, []);
+
+  const refreshSubscription = useCallback(async (): Promise<SubscriptionState | null> => {
+    if (!session) {
+      setSubscription(null);
+      setSubscriptionError(null);
+      return null;
+    }
+    const response = await fetch('/api/subscription', {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const result: SubscriptionState & { error?: string } = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || 'Could not load subscription status.');
+    }
+    setSubscription(result);
+    setSubscriptionError(null);
+    return result;
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) {
+      setSubscription(null);
+      return;
+    }
+    void refreshSubscription().catch((error: unknown) => {
+      console.error('Could not refresh subscription status:', error);
+      setSubscription((current) => current ? { ...current, isExpert: false } : null);
+      setSubscriptionError(error instanceof Error ? error.message : 'Could not load subscription status.');
+    });
+  }, [session, refreshSubscription]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const checkoutResult = params.get('subscription');
+    if (!checkoutResult || (checkoutResult === 'success' && !session)) return;
+
+    params.delete('subscription');
+    const remainingQuery = params.toString();
+    window.history.replaceState(
+      {},
+      '',
+      `${window.location.pathname}${remainingQuery ? `?${remainingQuery}` : ''}${window.location.hash}`
+    );
+
+    if (checkoutResult === 'cancelled') {
+      setBillingNotice('Checkout was cancelled. Your account remains on the free plan.');
+      setIsAccountModalOpen(true);
+      return;
+    }
+
+    if (checkoutResult === 'success') {
+      setIsAccountModalOpen(true);
+      setBillingNotice('Payment received. Confirming your Expert subscription…');
+      let isCancelled = false;
+      const pollSubscription = async () => {
+        for (let attempt = 0; attempt < 12 && !isCancelled; attempt += 1) {
+          try {
+            const latest = await refreshSubscription();
+            if (latest?.isExpert) {
+              setBillingNotice('Your Expert subscription is active. Full HD export is now unlocked.');
+              return;
+            }
+          } catch (error) {
+            console.error('Could not confirm the subscription yet:', error);
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        }
+        if (!isCancelled) {
+          setBillingNotice('Payment received. Subscription confirmation is still processing; refresh the status shortly.');
+        }
+      };
+      void pollSubscription();
+      return () => {
+        isCancelled = true;
+      };
+    }
+  }, [session, refreshSubscription]);
 
   // Initial demo project state with working clips
   const [videoClips, setVideoClips] = useState<VideoClip[]>([
@@ -101,7 +219,7 @@ export default function App() {
     },
     {
       id: 'txt-2',
-      text: 'Produced with CapCut Pro Studio',
+      text: 'Produced with VidCut Studio',
       startTime: 5.2,
       duration: 4.0,
       x: 50,
@@ -221,6 +339,11 @@ export default function App() {
         onOpenCppModal={() => setIsCppModalOpen(true)}
         onResetProject={handleResetProject}
         hasItems={videoClips.length > 0}
+        isExpert={isExpert}
+        onOpenAccount={() => {
+          setBillingNotice(null);
+          setIsAccountModalOpen(true);
+        }}
       />
 
       {/* Main Switchable Studio Views */}
@@ -240,7 +363,16 @@ export default function App() {
           />
         )}
 
-        {currentMode === 'video-merger' && <VideoMergerStudio />}
+        {currentMode === 'video-merger' && (
+          <VideoMergerStudio
+            accessToken={session?.access_token}
+            isExpert={isExpert}
+            onUpgrade={() => {
+              setBillingNotice(null);
+              setIsAccountModalOpen(true);
+            }}
+          />
+        )}
 
         {currentMode === 'thumbnail-designer' && (
           <ThumbnailDesigner initialVideoFrame={capturedThumbnailFrame} />
@@ -259,7 +391,25 @@ export default function App() {
         overlayClips={overlayClips}
         audioClips={audioClips}
         totalDuration={totalDuration}
+        accessToken={session?.access_token}
+        isExpert={isExpert}
+        onUpgrade={() => {
+          setBillingNotice(null);
+          setIsAccountModalOpen(true);
+        }}
       />
+
+      {isAccountModalOpen && (
+        <AccountModal
+          session={session}
+          user={user}
+          subscription={subscription}
+          subscriptionError={subscriptionError}
+          billingNotice={billingNotice}
+          onClose={() => setIsAccountModalOpen(false)}
+          onSubscriptionUpdated={refreshSubscription}
+        />
+      )}
 
       {/* C++ Native Turbo Engine Benchmark & Status Modal */}
       <CppEngineModal

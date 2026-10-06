@@ -301,11 +301,15 @@ export async function exportViaPythonEngine(
     resolution: string;
     fps: number;
     audioUrl?: string;
+    accessToken?: string;
   }
 ) {
   const response = await fetch('/api/merge', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.accessToken ? { Authorization: `Bearer ${options.accessToken}` } : {}),
+    },
     body: JSON.stringify({ clips, options }),
   });
 

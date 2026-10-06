@@ -1,24 +1,36 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
+import Stripe from 'stripe';
+import { createClient, type User } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8000;
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAdmin =
+  supabaseUrl && supabaseServiceRoleKey
+    ? createClient(supabaseUrl, supabaseServiceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      })
+    : null;
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
 
 // Ensure storage directories exist
 const UPLOADS_DIR = path.resolve(__dirname, 'uploads');
 const EXPORTS_DIR = path.resolve(__dirname, 'exports');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(EXPORTS_DIR)) fs.mkdirSync(EXPORTS_DIR, { recursive: true });
-
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Multer storage
 const storage = multer.diskStorage({
@@ -66,6 +78,256 @@ function callPythonProcessor(action: string, params: Record<string, unknown>): P
     });
   });
 }
+
+async function getAuthenticatedUser(
+  req: express.Request,
+  res: express.Response
+): Promise<User | null> {
+  if (!supabaseUrl || !supabaseAnonKey || !supabaseAdmin) {
+    res.status(503).json({ error: 'Subscription authentication is not configured on the server.' });
+    return null;
+  }
+
+  const authorization = req.headers.authorization;
+  if (!authorization?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Sign in to use this subscription feature.' });
+    return null;
+  }
+
+  const token = authorization.slice('Bearer '.length);
+  const authClient = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  try {
+    const { data, error } = await authClient.auth.getUser(token);
+    if (error || !data.user) {
+      res.status(401).json({ error: 'Your session is invalid or expired. Please sign in again.' });
+      return null;
+    }
+    return data.user;
+  } catch (error) {
+    console.error('Could not validate Supabase session:', error);
+    res.status(502).json({ error: 'Could not validate your account session. Try again shortly.' });
+    return null;
+  }
+}
+
+async function hasExpertSubscription(userId: string): Promise<boolean> {
+  if (!supabaseAdmin) {
+    throw new Error('Subscription database is not configured on the server.');
+  }
+  const { data, error } = await supabaseAdmin
+    .from('subscriptions')
+    .select('status, current_period_end')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw new Error(`Could not verify subscription: ${error.message}`);
+  if (!data || !['active', 'trialing'].includes(data.status)) return false;
+  return !data.current_period_end || new Date(data.current_period_end).getTime() > Date.now();
+}
+
+async function syncStripeSubscription(
+  subscription: Stripe.Subscription,
+  fallbackUserId?: string | null
+) {
+  if (!supabaseAdmin) {
+    throw new Error('Subscription database is not configured on the server.');
+  }
+  let userId = subscription.metadata.supabaseUserId || fallbackUserId || null;
+  if (!userId) {
+    const { data, error } = await supabaseAdmin
+      .from('subscriptions')
+      .select('user_id')
+      .eq('stripe_subscription_id', subscription.id)
+      .maybeSingle();
+    if (error) throw new Error(`Could not find subscription owner: ${error.message}`);
+    userId = data?.user_id ?? null;
+  }
+  if (!userId) {
+    console.warn(`Ignoring Stripe subscription ${subscription.id} without a VidCut account mapping.`);
+    return;
+  }
+
+  const customerId =
+    typeof subscription.customer === 'string'
+      ? subscription.customer
+      : subscription.customer.id;
+  const currentPeriodEnd = subscription.items.data.reduce(
+    (latest, item) => Math.max(latest, item.current_period_end),
+    0
+  );
+  const { error } = await supabaseAdmin.from('subscriptions').upsert(
+    {
+      user_id: userId,
+      stripe_customer_id: customerId,
+      stripe_subscription_id: subscription.id,
+      status: subscription.status,
+      price_id: subscription.items.data[0]?.price.id ?? null,
+      current_period_end: currentPeriodEnd
+        ? new Date(currentPeriodEnd * 1000).toISOString()
+        : null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id' }
+  );
+  if (error) throw new Error(`Could not save subscription status: ${error.message}`);
+}
+
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+    return res.status(503).json({ error: 'Stripe webhooks are not configured on the server.' });
+  }
+  const signature = req.headers['stripe-signature'];
+  if (!signature) {
+    return res.status(400).json({ error: 'Missing Stripe signature.' });
+  }
+
+  let event: Stripe.Event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, signature, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid Stripe webhook signature';
+    return res.status(400).json({ error: message });
+  }
+
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const checkout = event.data.object as Stripe.Checkout.Session;
+      if (checkout.mode === 'subscription' && checkout.subscription) {
+        const subscriptionId =
+          typeof checkout.subscription === 'string'
+            ? checkout.subscription
+            : checkout.subscription.id;
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        await syncStripeSubscription(
+          subscription,
+          checkout.client_reference_id || checkout.metadata?.supabaseUserId
+        );
+      }
+    } else if (
+      event.type === 'customer.subscription.created' ||
+      event.type === 'customer.subscription.updated' ||
+      event.type === 'customer.subscription.deleted'
+    ) {
+      await syncStripeSubscription(event.data.object as Stripe.Subscription);
+    }
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Stripe webhook processing failed:', error);
+    res.status(500).json({ error: 'Could not process Stripe subscription event.' });
+  }
+});
+
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+app.get('/api/subscription', async (req, res) => {
+  const user = await getAuthenticatedUser(req, res);
+  if (!user) return;
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Subscription database is not configured on the server.' });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('subscriptions')
+      .select('status, current_period_end')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const isExpert =
+      data !== null &&
+      ['active', 'trialing'].includes(data.status) &&
+      (!data.current_period_end || new Date(data.current_period_end).getTime() > Date.now());
+    res.json({
+      status: data?.status ?? 'free',
+      currentPeriodEnd: data?.current_period_end ?? null,
+      isExpert,
+    });
+  } catch (error) {
+    console.error('Subscription lookup failed:', error);
+    res.status(500).json({ error: 'Could not load subscription status.' });
+  }
+});
+
+app.post('/api/subscription/checkout', async (req, res) => {
+  const user = await getAuthenticatedUser(req, res);
+  if (!user) return;
+  if (
+    !stripe ||
+    !supabaseAdmin ||
+    !process.env.APP_URL ||
+    !process.env.STRIPE_EXPERT_PRICE_ID
+  ) {
+    return res.status(503).json({ error: 'Stripe billing is not fully configured on the server.' });
+  }
+  if (!user.email) {
+    return res.status(400).json({ error: 'Your account needs a verified email address to subscribe.' });
+  }
+
+  try {
+    if (await hasExpertSubscription(user.id)) {
+      return res.status(409).json({ error: 'Your account already has an active Expert subscription.' });
+    }
+    const { data: previousSubscription, error } = await supabaseAdmin
+      .from('subscriptions')
+      .select('stripe_customer_id')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (error) throw new Error(`Could not load billing customer: ${error.message}`);
+
+    const checkout = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: process.env.STRIPE_EXPERT_PRICE_ID, quantity: 1 }],
+      ...(previousSubscription?.stripe_customer_id
+        ? { customer: previousSubscription.stripe_customer_id }
+        : { customer_email: user.email }),
+      client_reference_id: user.id,
+      metadata: { supabaseUserId: user.id },
+      subscription_data: { metadata: { supabaseUserId: user.id } },
+      allow_promotion_codes: true,
+      success_url: `${process.env.APP_URL}/?subscription=success`,
+      cancel_url: `${process.env.APP_URL}/?subscription=cancelled`,
+    });
+    if (!checkout.url) throw new Error('Stripe did not return a checkout URL.');
+    res.json({ url: checkout.url });
+  } catch (error) {
+    console.error('Could not create Stripe checkout session:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Could not start checkout.' });
+  }
+});
+
+app.post('/api/subscription/portal', async (req, res) => {
+  const user = await getAuthenticatedUser(req, res);
+  if (!user) return;
+  if (!stripe || !supabaseAdmin || !process.env.APP_URL) {
+    return res.status(503).json({ error: 'Stripe billing is not fully configured on the server.' });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('subscriptions')
+    .select('stripe_customer_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (error) {
+    console.error('Could not load Stripe customer:', error);
+    return res.status(500).json({ error: 'Could not load billing account.' });
+  }
+  if (!data?.stripe_customer_id) {
+    return res.status(404).json({ error: 'No Stripe billing account is linked to this user.' });
+  }
+
+  try {
+    const portal = await stripe.billingPortal.sessions.create({
+      customer: data.stripe_customer_id,
+      return_url: process.env.APP_URL,
+    });
+    res.json({ url: portal.url });
+  } catch (error) {
+    console.error('Could not create Stripe billing portal session:', error);
+    res.status(500).json({ error: 'Could not open subscription management.' });
+  }
+});
 
 // Streaming range handler for videos and audio
 function streamFileWithRanges(req: express.Request, res: express.Response, filePath: string) {
@@ -191,6 +453,26 @@ app.post('/api/merge', async (req, res) => {
     }
 
     const fmt = options?.format || 'mp4';
+    const resolutionParts =
+      typeof options?.resolution === 'string'
+        ? options.resolution.split('x').map((dimension: string) => Number(dimension))
+        : [];
+    const requestsAboveFreeResolution =
+      resolutionParts.length === 2 &&
+      resolutionParts.every((dimension: number) => Number.isFinite(dimension)) &&
+      (Math.max(...resolutionParts) > 1280 ||
+        resolutionParts[0] * resolutionParts[1] > 1280 * 720);
+    if (requestsAboveFreeResolution) {
+      const user = await getAuthenticatedUser(req, res);
+      if (!user) return;
+      if (!(await hasExpertSubscription(user.id))) {
+        return res.status(403).json({
+          code: 'EXPERT_SUBSCRIPTION_REQUIRED',
+          error: 'Full HD exports require an active VidCut Studio Expert subscription.',
+        });
+      }
+    }
+
     const outFileName = `merged-${Date.now()}.${fmt}`;
     const outPath = path.resolve(EXPORTS_DIR, outFileName);
 
@@ -519,7 +801,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`CapCut Studio Server running on http://0.0.0.0:${PORT}`);
+    console.log(`VidCut Studio server running on http://0.0.0.0:${PORT}`);
   });
 }
 

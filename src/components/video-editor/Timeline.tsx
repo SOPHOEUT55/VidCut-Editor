@@ -13,7 +13,7 @@ import {
   Loader2,
   Sparkles,
 } from 'lucide-react';
-import { VideoClip, TextClip, OverlayClip, AudioClip } from '../../types/editor';
+import { MediaItem, VideoClip, TextClip, OverlayClip, AudioClip } from '../../types/editor';
 import { formatTimecode, formatDurationSimple } from '../../utils/timeFormat';
 
 interface TimelineProps {
@@ -31,6 +31,7 @@ interface TimelineProps {
   onDuplicateClip: (id: string) => void;
   onUpdateClipDuration: (id: string, newIn: number, newOut: number) => void;
   onMoveClipPosition: (id: string, newStartTime: number) => void;
+  onDropVideoClip: (media: MediaItem, startTime: number) => void;
   onCppAutoSplit?: (cuts: number[]) => void;
 }
 
@@ -49,6 +50,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onDuplicateClip,
   onUpdateClipDuration,
   onMoveClipPosition,
+  onDropVideoClip,
   onCppAutoSplit,
 }) => {
   const [zoom, setZoom] = useState(30); // pixels per second
@@ -56,6 +58,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [isDetectingScenes, setIsDetectingScenes] = useState(false);
   const [waveformBars, setWaveformBars] = useState<number[]>([]);
+  const clipDragRef = useRef<{ id: string; startX: number; startTime: number } | null>(null);
 
   // Load C++ audio waveform analysis for active audio
   useEffect(() => {
@@ -134,6 +137,29 @@ export const Timeline: React.FC<TimelineProps> = ({
     };
   }, [isScrubbing, maxDuration, zoom, onSeek]);
 
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      const draggedClip = clipDragRef.current;
+      if (!draggedClip) return;
+      const nextStartTime = Math.max(
+        0,
+        draggedClip.startTime + (e.clientX - draggedClip.startX) / zoom
+      );
+      onMoveClipPosition(draggedClip.id, nextStartTime);
+    };
+
+    const handleMouseUp = () => {
+      clipDragRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [onMoveClipPosition, zoom]);
+
   // Generate ruler tick marks
   const renderRulerTicks = () => {
     const ticks = [];
@@ -208,7 +234,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             ) : (
               <Cpu className="w-3.5 h-3.5 text-cyan-400" />
             )}
-            <span>C++ Auto Split</span>
+            <span>Auto Scene Split</span>
           </button>
         </div>
 
@@ -243,6 +269,42 @@ export const Timeline: React.FC<TimelineProps> = ({
       <div
         ref={timelineRef}
         onMouseDown={handleTimelineMouseDown}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes('application/x-vidcut-media')) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+          }
+        }}
+        onDrop={(e) => {
+          const mediaData = e.dataTransfer.getData('application/x-vidcut-media');
+          if (!mediaData || !timelineRef.current) return;
+
+          e.preventDefault();
+          let media: MediaItem;
+          try {
+            media = JSON.parse(mediaData) as MediaItem;
+          } catch (error) {
+            console.error('Could not read dragged media item:', error);
+            return;
+          }
+          if (
+            !media ||
+            media.type !== 'video' ||
+            typeof media.id !== 'string' ||
+            typeof media.name !== 'string' ||
+            typeof media.url !== 'string' ||
+            typeof media.duration !== 'number' ||
+            !Number.isFinite(media.duration)
+          ) {
+            console.error('Dragged media item is not a valid video.');
+            return;
+          }
+
+          const rect = timelineRef.current.getBoundingClientRect();
+          const dropX = e.clientX - rect.left + timelineRef.current.scrollLeft;
+          const startTime = Math.max(0, Math.min(maxDuration, dropX / zoom));
+          onDropVideoClip(media, startTime);
+        }}
         className="flex-1 overflow-x-auto overflow-y-auto relative cursor-crosshair bg-[#0a0e17]"
       >
         <div
@@ -365,8 +427,18 @@ export const Timeline: React.FC<TimelineProps> = ({
                       e.stopPropagation();
                       onSelectClip(clip.id, 'video');
                     }}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      onSelectClip(clip.id, 'video');
+                      clipDragRef.current = {
+                        id: clip.id,
+                        startX: e.clientX,
+                        startTime: clip.startTime,
+                      };
+                    }}
+                    title="Drag to move this video clip"
                     style={{ left: `${left}px`, width: `${width}px` }}
-                    className={`absolute h-14 rounded-lg overflow-hidden flex flex-col justify-between p-1.5 cursor-pointer transition-all border ${
+                    className={`absolute h-14 rounded-lg overflow-hidden flex flex-col justify-between p-1.5 cursor-grab active:cursor-grabbing transition-all border ${
                       isSelected
                         ? 'bg-cyan-950/60 border-cyan-400 shadow-lg shadow-cyan-500/10'
                         : 'bg-[#192336] border-slate-700/80 hover:border-cyan-500/40'
